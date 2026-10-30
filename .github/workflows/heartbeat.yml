@@ -1,0 +1,29 @@
+name: Daily heartbeat
+on:
+  schedule:
+    - cron: "30 3 * * *"   # 09:00 IST every day
+  workflow_dispatch:
+concurrency:
+  group: heartbeat
+jobs:
+  beat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install playwright requests
+      - run: python check.py
+        env:
+          HEARTBEAT: "true"
+          KEYWORD: ${{ vars.KEYWORD }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          TWILIO_SID: ${{ secrets.TWILIO_SID }}
+          TWILIO_TOKEN: ${{ secrets.TWILIO_TOKEN }}
+          WA_TO: ${{ secrets.WA_TO }}
+          TWILIO_WA_FROM: ${{ secrets.TWILIO_WA_FROM }}
