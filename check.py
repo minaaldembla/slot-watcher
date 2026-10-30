@@ -1,5 +1,6 @@
 import os
 import smtplib
+from datetime import datetime, timezone
 from email.message import EmailMessage
 
 import requests
@@ -13,17 +14,21 @@ def env(name, default=""):
     return "".join((os.getenv(name) or default).split())
 
 
-def send_ntfy(msg):
+def ntfy(msg, title, priority, tags):
     topic = env("NTFY_TOPIC")
     if not topic:
         return
     requests.post(
         f"https://ntfy.sh/{topic}",
         data=msg.encode("utf-8"),
-        headers={"Title": "D-visa slot OPEN", "Priority": "urgent",
-                 "Tags": "rotating_light", "Click": URL},
+        headers={"Title": title, "Priority": priority,
+                 "Tags": tags, "Click": URL},
         timeout=15,
     )
+
+
+def send_ntfy(msg):
+    ntfy(msg, "D-visa slot OPEN", "urgent", "rotating_light")
 
 
 def send_email(msg):
@@ -63,52 +68,73 @@ def alert(msg):
             print(f"{fn.__name__} FAILED: {e}")
 
 
+def check():
+    """Returns (found, detail). Raises an error if something is really broken."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(channel="chrome")
+        page = browser.new_page()
+
+        # Site down / maintenance: not our fault, report it but don't fail
+        try:
+            resp = page.goto(URL, timeout=45000)
+        except Exception as e:
+            return False, f"Site unreachable: {str(e)[:120]}"
+        status = resp.status if resp else 0
+        try:
+            body = page.inner_text("body", timeout=5000).lower()
+        except Exception:
+            body = ""
+        if status >= 500 or "down for maintenance" in body or "hooldust" in body:
+            return False, f"Site in maintenance/unavailable (HTTP {status})"
+
+        first = page.locator("select").first
+        first.wait_for(timeout=20000)
+        target = next((o for o in first.locator("option").all_inner_texts()
+                       if "New Delhi" in o), None)
+        if not target:
+            raise RuntimeError("New Delhi option not found - site layout changed?")
+        first.select_option(label=target)
+
+        found = False
+        seen = {}
+        for _ in range(12):
+            page.wait_for_timeout(1000)
+            selects = page.locator("select")
+            for i in range(1, selects.count()):
+                texts = selects.nth(i).locator("option").all_inner_texts()
+                seen[i] = texts
+                if any(KEYWORD.lower() in t.lower() for t in texts):
+                    found = True
+            if found:
+                break
+        browser.close()
+        return found, f"Site up. Dropdown 2 options: {seen}"
+
+
 if env("TEST_ALERT") == "true":
     alert(f"TEST alert from your Estonia slot watcher. Booking site: {URL}")
     raise SystemExit(0)
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(channel="chrome")
-    page = browser.new_page()
+try:
+    found, detail = check()
+except Exception as e:
+    msg = f"Watcher ERROR: {str(e)[:300]}"
+    print(msg)
+    # tell the phone about errors about once an hour (not every 5 minutes)
+    if datetime.now(timezone.utc).minute < 5:
+        try:
+            ntfy(msg, "Watcher ERROR", "high", "warning")
+        except Exception:
+            pass
+    raise SystemExit(1)
 
-    # Site down / maintenance: skip quietly (exit OK) so you don't get failure emails
+print(detail)
+print("SLOT OPEN" if found else "no slot")
+if found:
+    alert(f"Estonia Embassy New Delhi: '{KEYWORD}' is selectable NOW! Book: {URL}")
+if env("HEARTBEAT") == "true":
     try:
-        resp = page.goto(URL, timeout=45000)
+        ntfy(f"Watcher alive. {detail}. Slot: {'YES' if found else 'no'}",
+             "Watcher OK", "low", "white_check_mark")
     except Exception as e:
-        print(f"Site unreachable, skipping this round: {e}")
-        raise SystemExit(0)
-    status = resp.status if resp else 0
-    try:
-        body = page.inner_text("body", timeout=5000).lower()
-    except Exception:
-        body = ""
-    if status >= 500 or "down for maintenance" in body or "hooldust" in body:
-        print(f"Site in maintenance/unavailable (HTTP {status}), skipping this round")
-        raise SystemExit(0)
-
-    first = page.locator("select").first
-    first.wait_for(timeout=20000)
-    target = next((o for o in first.locator("option").all_inner_texts()
-                   if "New Delhi" in o), None)
-    if not target:
-        raise SystemExit("New Delhi option not found - site layout changed?")
-    first.select_option(label=target)
-
-    found = False
-    seen = {}
-    for _ in range(12):
-        page.wait_for_timeout(1000)
-        selects = page.locator("select")
-        for i in range(1, selects.count()):
-            texts = selects.nth(i).locator("option").all_inner_texts()
-            seen[i] = texts
-            if any(KEYWORD.lower() in t.lower() for t in texts):
-                found = True
-        if found:
-            break
-
-    print("Dropdown 2 options seen:", seen)
-    print("SLOT OPEN" if found else "no slot")
-    if found:
-        alert(f"Estonia Embassy New Delhi: '{KEYWORD}' is selectable NOW! Book: {URL}")
-    browser.close()
+        print(f"heartbeat FAILED: {e}")
